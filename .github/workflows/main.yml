@@ -1,0 +1,135 @@
+name: Build q2q_f926n_a14 Kernel (KSU & No-KSU)
+
+on:
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    strategy:
+      matrix:
+        ksu: [true, false]
+    steps:
+      - name: Checkout kernel source
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Install build dependencies
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y bc bison build-essential ccache curl flex \
+            git gnupg gperf imagemagick \
+            lib32ncurses5-dev lib32readline-dev lib32z1-dev libelf-dev \
+            liblz4-tool libncurses5 libncurses5-dev libsdl1.2-dev \
+            libssl-dev libxml2 libxml2-utils lzop pngcrush rsync \
+            schedtool squashfs-tools xsltproc zip zlib1g-dev \
+            python3 python3-pip patch clang llvm lld
+
+      - name: Download AOSP GCC toolchain
+        run: |
+          git clone --depth=1 \
+            https://github.com/LineageOS/android_prebuilts_gcc_linux-x86_aarch64_aarch64-linux-android-4.9 \
+            /opt/gcc-aarch64
+          echo "/opt/gcc-aarch64/bin" >> $GITHUB_PATH
+
+      - name: Setup ccache
+        uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          max-size: 2G
+          key: ${{ matrix.ksu }}-q2q
+
+      - name: Download Droidspaces patches
+        run: |
+          git clone --depth 1 https://github.com/ravindu644/Droidspaces-OSS.git /tmp/droidspaces
+          mkdir -p patches
+          cp /tmp/droidspaces/Documentation/resources/kernel-patches/GKI/below-kernel-6.12/001.GKI-below-6.12-fix_sysvipc_kABI_6_7_8.patch patches/ 2>/dev/null || true
+          cp /tmp/droidspaces/Documentation/resources/kernel-patches/GKI/below-kernel-6.12/002.5.10_or_lower_use_android_abi_padding_for_posix_mqueue.patch patches/ 2>/dev/null || true
+
+      - name: Apply Droidspaces kABI patches
+        run: |
+          if [ -f patches/001.GKI-below-6.12-fix_sysvipc_kABI_6_7_8.patch ]; then
+            patch -p1 < patches/001.GKI-below-6.12-fix_sysvipc_kABI_6_7_8.patch || echo "SYSVIPC patch may already be applied"
+          fi
+          if [ -f patches/002.5.10_or_lower_use_android_abi_padding_for_posix_mqueue.patch ]; then
+            patch -p1 < patches/002.5.10_or_lower_use_android_abi_padding_for_posix_mqueue.patch || echo "POSIX_MQUEUE patch may already be applied"
+          fi
+
+      - name: Add Droidspaces GKI config to defconfig
+        run: |
+          DEFCONFIG=arch/arm64/configs/vendor/q2q_eur_openx_defconfig
+          cat >> $DEFCONFIG << 'EOF'
+
+          # Droidspaces GKI required config
+          CONFIG_SYSVIPC=y
+          CONFIG_POSIX_MQUEUE=y
+          CONFIG_IPC_NS=y
+          CONFIG_PID_NS=y
+          CONFIG_DEVTMPFS=y
+          CONFIG_NETFILTER_XT_MATCH_ADDRTYPE=y
+          CONFIG_USER_NS=y
+          CONFIG_NETFILTER_XT_TARGET_REJECT=y
+          CONFIG_NETFILTER_XT_TARGET_LOG=y
+          CONFIG_NETFILTER_XT_MATCH_RECENT=y
+          CONFIG_IP_SET=y
+          CONFIG_IP_SET_HASH_IP=y
+          CONFIG_IP_SET_HASH_NET=y
+          CONFIG_NETFILTER_XT_SET=y
+          CONFIG_TMPFS_POSIX_ACL=y
+          CONFIG_TMPFS_XATTR=y
+          EOF
+
+      - name: Integrate KernelSU (only for KSU version)
+        if: matrix.ksu == true
+        run: |
+          curl -LSs "https://raw.githubusercontent.com/tiann/KernelSU/main/kernel/setup.sh" | bash -s v0.9.5
+          DEFCONFIG=arch/arm64/configs/vendor/q2q_eur_openx_defconfig
+          echo "CONFIG_KSU=y" >> $DEFCONFIG
+          echo "CONFIG_KPROBES=y" >> $DEFCONFIG
+
+      - name: Configure kernel
+        run: |
+          export ARCH=arm64
+          export SUBARCH=arm64
+          export CC="ccache clang"
+          export CLANG_TRIPLE=aarch64-linux-gnu-
+          export CROSS_COMPILE=aarch64-linux-android-
+
+          make -C $(pwd) O=$(pwd)/out \
+            DTC_EXT=$(pwd)/tools/dtc \
+            CONFIG_BUILD_ARM64_DT_OVERLAY=y \
+            CLANG_TRIPLE=aarch64-linux-gnu- \
+            vendor/q2q_eur_openx_defconfig
+
+      - name: Build kernel
+        run: |
+          export ARCH=arm64
+          export SUBARCH=arm64
+          export CC="ccache clang"
+          export CLANG_TRIPLE=aarch64-linux-gnu-
+          export CROSS_COMPILE=aarch64-linux-android-
+
+          make -C $(pwd) O=$(pwd)/out \
+            DTC_EXT=$(pwd)/tools/dtc \
+            CONFIG_BUILD_ARM64_DT_OVERLAY=y \
+            CLANG_TRIPLE=aarch64-linux-gnu- \
+            -j$(nproc)
+
+      - name: Find and list build outputs
+        run: |
+          echo "=== Kernel images ==="
+          find out -name "Image*" -o -name "*.dtb" -o -name "dtbo.img" 2>/dev/null
+          echo "=== Looking for dtbo ==="
+          find out -name "*dtbo*" 2>/dev/null
+
+      - name: Upload kernel artifacts
+        uses: actions/upload-artifact@v4
+        with:
+          name: q2q-kernel-${{ matrix.ksu && 'with-ksu' || 'no-ksu' }}-${{ github.sha }}
+          path: |
+            out/arch/arm64/boot/Image.gz
+            out/arch/arm64/boot/Image
+            out/arch/arm64/boot/dtb
+            out/arch/arm64/boot/dtbo.img
+            out/arch/arm64/boot/*.dtb
+          if-no-files-found: warn

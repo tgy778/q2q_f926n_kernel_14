@@ -86,6 +86,13 @@ jobs:
           DEFCONFIG=arch/arm64/configs/vendor/q2q_eur_openx_defconfig
           echo "CONFIG_KSU=y" >> $DEFCONFIG
           echo "CONFIG_KPROBES=y" >> $DEFCONFIG
+      
+      - name: Diagnose secgetspf
+        run: |
+          echo "=== Find secgetspf files ==="
+          find . -name "secgetspf*" -not -path "./out/*" || echo "Not found"
+          echo "=== Search references ==="
+          grep -rn "secgetspf" --include="Makefile*" --include="*.mk" . 2>/dev/null | head -20 || echo "No references"
 
       - name: Configure kernel
         run: |
